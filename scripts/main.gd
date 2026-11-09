@@ -703,6 +703,7 @@ func _send_group_to_slot(ci: int) -> void:
 	for i in customers.size():
 		var off := Vector3(inward + (i % 2) * inward * 0.6, 0, (i - customers.size() / 2.0) * 0.6)
 		customers[i].go([p + off])
+		customers[i].face = p
 		customers[i].thinking = true
 
 # ---------------------------------------------------------------- interactions
@@ -768,6 +769,7 @@ func _send_group_to_slot_after_entry() -> void:
 	for i in customers.size():
 		var off := Vector3(inward + (i % 2) * inward * 0.6, 0, (i - customers.size() / 2.0) * 0.6)
 		customers[i].go([ROOM_DOOR + Vector3(0, 0, -0.6), ROOM_DOOR + Vector3(0, 0, 1.0), p + off])
+		customers[i].face = p
 		customers[i].thinking = true
 
 func _set_door(locked: bool) -> void:
@@ -883,8 +885,8 @@ func _finish() -> void:
 	_set_door(false)
 	for cu in customers:
 		cu.thinking = false
-		cu.go([ROOM_DOOR + Vector3(0, 0, 1.0), ROOM_DOOR + Vector3(0, 0, -0.8), LOBBY_EXIT])
-		cu.leave_when_done = true
+		cu.mood = "cheer" if group.escaped else "angry"
+	_send_customers_home()
 	var reviewer: String = group.members[0].name
 	for m in group.members:
 		if m.trait == "Influencer":
@@ -901,6 +903,16 @@ func _finish() -> void:
 	review_panel.visible = true
 	phase = "review"
 	_save()
+
+func _send_customers_home() -> void:
+	# let them celebrate (or sulk) for a moment, then walk out
+	await get_tree().create_timer(3.5).timeout
+	for cu in customers:
+		if is_instance_valid(cu):
+			cu.mood = ""
+			cu.face = null
+			cu.go([ROOM_DOOR + Vector3(0, 0, 1.0), ROOM_DOOR + Vector3(0, 0, -0.8), LOBBY_EXIT])
+			cu.leave_when_done = true
 
 # ---------------------------------------------------------------- reset
 func _begin_reset() -> void:
