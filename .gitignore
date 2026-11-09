@@ -2,3 +2,5 @@
 *.import
 export/
 builds/
+# textures Godot extracts from the FBX files on import
+assets/characters/**/*.png
