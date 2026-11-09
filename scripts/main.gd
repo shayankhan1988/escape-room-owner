@@ -6,6 +6,7 @@ extends Node3D
 const Interactable := preload("res://scripts/interactable.gd")
 const Player := preload("res://scripts/player.gd")
 const Customer := preload("res://scripts/customer.gd")
+const FlickerLight := preload("res://scripts/flicker_light.gd")
 
 const SAVE_PATH := "user://save.json"
 const GROUPS_PER_DAY := 4
@@ -112,7 +113,7 @@ func _ready() -> void:
 
 # ---------------------------------------------------------------- input
 func _setup_input() -> void:
-	var keys := {"move_forward": [KEY_W, KEY_UP], "move_back": [KEY_S, KEY_DOWN], "move_left": [KEY_A, KEY_LEFT], "move_right": [KEY_D, KEY_RIGHT], "interact": [KEY_E], "speed": [KEY_TAB]}
+	var keys := {"move_forward": [KEY_W, KEY_UP], "move_back": [KEY_S, KEY_DOWN], "move_left": [KEY_A, KEY_LEFT], "move_right": [KEY_D, KEY_RIGHT], "interact": [KEY_E], "speed": [KEY_TAB], "cam_1": [KEY_1], "cam_2": [KEY_2], "cam_3": [KEY_3], "flashlight": [KEY_F]}
 	for action in keys:
 		if not InputMap.has_action(action):
 			InputMap.add_action(action)
@@ -124,13 +125,69 @@ func _setup_input() -> void:
 func _unhandled_input(e: InputEvent) -> void:
 	if e.is_action_pressed("speed") and phase == "session":
 		_cycle_speed()
+	for i in CAMS.size():
+		if e.is_action_pressed("cam_%d" % (i + 1)):
+			switch_cam(i)
 
 # ---------------------------------------------------------------- building helpers
-func _mat(color: String) -> StandardMaterial3D:
+var _mats := {}
+
+# A material by color ("#rrggbb") or by surface name ("@wood", "@concrete", ...).
+# Surfaces use generated noise textures so walls and floors are not flat colors.
+func _mat(key: String) -> StandardMaterial3D:
+	if _mats.has(key):
+		return _mats[key]
 	var m := StandardMaterial3D.new()
-	m.albedo_color = Color(color)
 	m.roughness = 0.85
+	if key.begins_with("@"):
+		var spec: Dictionary = SURFACES[key]
+		var noise := FastNoiseLite.new()
+		noise.seed = key.hash()
+		noise.noise_type = spec.get("type", FastNoiseLite.TYPE_SIMPLEX)
+		noise.frequency = spec.get("freq", 0.02)
+		noise.fractal_octaves = 4
+		var tex := NoiseTexture2D.new()
+		tex.width = 512
+		tex.height = 512
+		tex.seamless = true
+		tex.noise = noise
+		var g := Gradient.new()
+		var base := Color(spec.base)
+		g.set_color(0, base.darkened(spec.get("var", 0.25)))
+		g.set_color(1, base.lightened(spec.get("var", 0.25) * 0.6))
+		tex.color_ramp = g
+		m.albedo_texture = tex
+		m.uv1_triplanar = true
+		m.uv1_scale = Vector3.ONE * spec.get("scale", 0.5)
+		m.uv1_world_triplanar = true
+		var nt := NoiseTexture2D.new()
+		nt.width = 512
+		nt.height = 512
+		nt.seamless = true
+		nt.as_normal_map = true
+		nt.bump_strength = spec.get("bump", 2.0) * 0.35
+		nt.noise = noise
+		m.normal_enabled = true
+		m.normal_texture = nt
+		m.roughness = spec.get("rough", 0.85)
+	else:
+		m.albedo_color = Color(key)
+	_mats[key] = m
 	return m
+
+const SURFACES := {
+	"@wood_floor": {"base": "#5a3b24", "var": 0.35, "freq": 0.008, "type": FastNoiseLite.TYPE_VALUE_CUBIC, "scale": 0.6, "rough": 0.55, "bump": 3.0},
+	"@wood": {"base": "#4a2e1c", "var": 0.3, "freq": 0.01, "type": FastNoiseLite.TYPE_VALUE_CUBIC, "scale": 1.0, "rough": 0.5},
+	"@concrete": {"base": "#6c6f70", "var": 0.22, "freq": 0.03, "scale": 0.35, "rough": 0.95, "bump": 1.5},
+	"@tiles": {"base": "#3f4648", "var": 0.18, "freq": 0.05, "type": FastNoiseLite.TYPE_CELLULAR, "scale": 0.5, "rough": 0.35, "bump": 4.0},
+	"@wallpaper": {"base": "#3e2a2c", "var": 0.25, "freq": 0.06, "type": FastNoiseLite.TYPE_CELLULAR, "scale": 0.8, "rough": 0.9, "bump": 0.8},
+	"@plaster": {"base": "#77756c", "var": 0.15, "freq": 0.04, "scale": 0.4, "rough": 0.95, "bump": 1.0},
+	"@carpet": {"base": "#2c3438", "var": 0.2, "freq": 0.2, "scale": 1.0, "rough": 1.0, "bump": 0.6},
+	"@rug": {"base": "#6b1f24", "var": 0.3, "freq": 0.08, "type": FastNoiseLite.TYPE_CELLULAR, "scale": 1.0, "rough": 1.0, "bump": 0.5},
+	"@leather": {"base": "#3b2116", "var": 0.25, "freq": 0.1, "scale": 1.5, "rough": 0.45, "bump": 1.2},
+	"@metal": {"base": "#4b5157", "var": 0.15, "freq": 0.05, "scale": 1.0, "rough": 0.35, "bump": 0.5},
+	"@fabric": {"base": "#2f3a4a", "var": 0.2, "freq": 0.15, "scale": 1.5, "rough": 1.0, "bump": 0.7},
+}
 
 func box(pos: Vector3, size: Vector3, color: String, collide := true, parent: Node = self) -> Node3D:
 	var root: Node3D = StaticBody3D.new() if collide else Node3D.new()
@@ -149,6 +206,35 @@ func box(pos: Vector3, size: Vector3, color: String, collide := true, parent: No
 		root.add_child(cs)
 	parent.add_child(root)
 	return root
+
+func cyl(pos: Vector3, radius: float, height: float, color: String, collide := false) -> Node3D:
+	var root: Node3D = StaticBody3D.new() if collide else Node3D.new()
+	root.position = pos
+	var mi := MeshInstance3D.new()
+	var cm := CylinderMesh.new()
+	cm.top_radius = radius
+	cm.bottom_radius = radius
+	cm.height = height
+	mi.mesh = cm
+	mi.material_override = _mat(color)
+	root.add_child(mi)
+	if collide:
+		var cs := CollisionShape3D.new()
+		var sh := CylinderShape3D.new()
+		sh.radius = radius
+		sh.height = height
+		cs.shape = sh
+		root.add_child(cs)
+	add_child(root)
+	return root
+
+func glow_mat(color: Color, energy := 3.0) -> StandardMaterial3D:
+	var m := StandardMaterial3D.new()
+	m.albedo_color = color
+	m.emission_enabled = true
+	m.emission = color
+	m.emission_energy_multiplier = energy
+	return m
 
 func interactable(pos: Vector3, size: Vector3, color: String, prompt: String, cb: Callable):
 	var b = Interactable.new()
@@ -200,64 +286,167 @@ func wall_z(x: float, z0: float, z1: float, color: String, gap := Vector2(-1, -1
 		box(Vector3(x, 1.5, (gap.y + z1) / 2), Vector3(0.2, 3, z1 - gap.y), color)
 		box(Vector3(x, 2.6, (gap.x + gap.y) / 2), Vector3(0.2, 0.8, gap.y - gap.x), color)
 
+func tube_light(pos: Vector3, color: String, energy: float, light_range: float, flicker: float, shadows := true) -> void:
+	var l = FlickerLight.new()
+	l.position = pos
+	add_child(l)
+	l.setup(Color(color), energy, light_range, flicker, shadows)
+
+func lamp(pos: Vector3, color: String, energy: float, light_range: float) -> void:
+	var l := OmniLight3D.new()
+	l.position = pos
+	l.light_color = Color(color)
+	l.light_energy = energy
+	l.omni_range = light_range
+	l.omni_attenuation = 1.6
+	l.shadow_enabled = true
+	add_child(l)
+
 # ---------------------------------------------------------------- world
 func _build_environment() -> void:
 	var env := WorldEnvironment.new()
 	var e := Environment.new()
 	e.background_mode = Environment.BG_COLOR
-	e.background_color = Color("#20262d")
+	e.background_color = Color.BLACK
 	e.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	e.ambient_light_color = Color("#c8d0d8")
-	e.ambient_light_energy = 0.35
-	e.tonemap_mode = Environment.TONE_MAPPER_FILMIC
+	e.ambient_light_color = Color("#6f7f99")
+	e.ambient_light_energy = 0.15
+	e.tonemap_mode = Environment.TONE_MAPPER_ACES
+	e.tonemap_exposure = 1.1
+	e.glow_enabled = true
+	e.glow_intensity = 0.6
+	e.glow_bloom = 0.05
+	e.ssao_enabled = true
+	e.ssao_intensity = 2.5
+	e.volumetric_fog_enabled = true
+	e.volumetric_fog_density = 0.015
+	e.volumetric_fog_albedo = Color("#8a93a0")
+	e.adjustment_enabled = true
+	e.adjustment_contrast = 1.12
+	e.adjustment_saturation = 0.82
 	env.environment = e
 	add_child(env)
-	var sun := DirectionalLight3D.new()
-	sun.rotation_degrees = Vector3(-60, 35, 0)
-	sun.light_energy = 0.4
-	sun.shadow_enabled = true
-	add_child(sun)
-	for p in [Vector3(5, 2.8, 4), Vector3(13, 2.8, 4), Vector3(5, 2.8, 14), Vector3(11, 2.8, 14)]:
-		var l := OmniLight3D.new()
-		l.position = p
-		l.omni_range = 9
-		l.light_energy = 0.45
-		add_child(l)
 
 func _build_venue() -> void:
-	# floors
-	box(Vector3(5, -0.05, 4), Vector3(10, 0.1, 8), "#4f5e69")       # lobby
-	box(Vector3(13, -0.05, 4), Vector3(6, 0.1, 8), "#4a5560")       # control room
-	box(Vector3(8, -0.05, 14), Vector3(16, 0.1, 12), "#5b4636")     # escape room (wood)
+	# floors and ceilings
+	box(Vector3(5, -0.05, 4), Vector3(10, 0.1, 8), "@tiles")          # lobby
+	box(Vector3(13, -0.05, 4), Vector3(6, 0.1, 8), "@carpet")         # control room
+	box(Vector3(8, -0.05, 14), Vector3(16, 0.1, 12), "@wood_floor")   # escape room
+	box(Vector3(8, 3.05, 10), Vector3(16, 0.1, 20), "@plaster", false)
 	# outer walls
-	wall_x(0, 0, 16, "#8e9aa4")
-	wall_x(20, 0, 16, "#3b2e3a")
-	wall_z(0, 0, 8, "#8e9aa4")
-	wall_z(16, 0, 8, "#8e9aa4")
-	wall_z(0, 8, 20, "#3b2e3a")
-	wall_z(16, 8, 20, "#3b2e3a")
+	wall_x(0, 0, 16, "@concrete")
+	wall_x(20, 0, 16, "@wallpaper")
+	wall_z(0, 0, 8, "@concrete")
+	wall_z(16, 0, 8, "@concrete")
+	wall_z(0, 8, 20, "@wallpaper")
+	wall_z(16, 8, 20, "@wallpaper")
 	# interior walls
-	wall_z(10, 0, 8, "#7f8b95", Vector2(3, 4.5))                    # lobby | control room
-	wall_x(8, 0, 16, "#3b2e3a", Vector2(4, 5.5))                    # lobby/control | escape room
+	wall_z(10, 0, 8, "@plaster", Vector2(3, 4.5))                     # lobby | control room
+	wall_x(8, 0, 16, "@wallpaper", Vector2(4, 5.5))                   # lobby/control | escape room
 	# escape room door (removed when unlocked)
-	door_body = box(Vector3(4.75, 1.1, 8), Vector3(1.5, 2.2, 0.15), "#a3392b") as StaticBody3D
-	# lobby props
-	box(Vector3(7.5, 0.55, 2.0), Vector3(3, 1.1, 0.8), "#2d3640")   # reception desk
-	box(Vector3(1.2, 0.25, 6.5), Vector3(2, 0.5, 0.7), "#55606b")   # bench
-	label3d("LOBBY", Vector3(5, 2.6, 0.2), 96, Color("#ffb23e"), false)
-	label3d("CONTROL ROOM", Vector3(10.1, 2.6, 3.75), 56, Color("#ffb23e"), false).rotation.y = PI / 2
-	var room_sign := label3d("THE STUDY", Vector3(4.75, 2.6, 7.88), 72, Color("#ffb23e"), false)
+	door_body = box(Vector3(4.75, 1.1, 8), Vector3(1.5, 2.2, 0.12), "@wood") as StaticBody3D
+	var knob := MeshInstance3D.new()
+	var sm := SphereMesh.new()
+	sm.radius = 0.05
+	sm.height = 0.1
+	knob.mesh = sm
+	knob.material_override = _mat("#b8913a")
+	knob.position = Vector3(0.55, 0, -0.1)
+	door_body.add_child(knob)
+	label3d("LOBBY", Vector3(5, 2.6, 0.12), 96, Color("#c9b27c"), false)
+	label3d("STAFF ONLY", Vector3(10.12, 2.6, 3.75), 48, Color("#c9b27c"), false).rotation.y = PI / 2
+	var room_sign := label3d("THE STUDY", Vector3(4.75, 2.6, 7.88), 72, Color("#c9b27c"), false)
 	room_sign.rotation.y = PI
-	# escape room decor
-	box(Vector3(8, 0.4, 14.5), Vector3(2.4, 0.8, 1.4), "#6b4a2f")   # big table
-	box(Vector3(8, 1.6, 19.85), Vector3(1.2, 1.6, 0.1), "#c9b27c", false)  # painting
-	box(Vector3(8, 0.03, 9.2), Vector3(1.2, 0.05, 0.6), "#2fbf71", false)  # exit marker
-	label3d("EXIT", Vector3(4.75, 2.3, 8.15), 48, Color("#2fbf71"), false)
+	# green exit sign above the room door, inside the room
+	var exit_sign := box(Vector3(4.75, 2.55, 8.14), Vector3(0.6, 0.22, 0.05), "#000000", false)
+	exit_sign.get_child(0).material_override = glow_mat(Color("#2fbf71"), 2.0)
+	label3d("EXIT", Vector3(4.75, 2.55, 8.18), 40, Color("#d8ffe6"), false)
+	lamp(Vector3(4.75, 2.3, 8.5), "#2fbf71", 0.4, 2.5)
+	# ---- lighting: cold tube lights in lobby/control room, warm lamps in the study
+	tube_light(Vector3(3, 2.95, 4), "#d8e6ff", 1.4, 7, 0.02)
+	tube_light(Vector3(7.5, 2.95, 4), "#d8e6ff", 1.2, 7, 0.25)
+	tube_light(Vector3(13, 2.95, 3), "#c8d8ff", 0.7, 5, 0.12)
+	tube_light(Vector3(8, 2.95, 11.5), "#ffe2b8", 0.6, 6, 0.08)
+	_build_lobby()
+	_build_study()
+
+func _build_lobby() -> void:
+	# reception desk with a bell and a guest book
+	box(Vector3(7.5, 0.55, 2.0), Vector3(3, 1.1, 0.8), "@wood")
+	box(Vector3(7.5, 1.12, 2.0), Vector3(3.1, 0.05, 0.9), "#1d1a18", false)
+	cyl(Vector3(6.6, 1.18, 2.0), 0.07, 0.06, "#b8913a")
+	box(Vector3(8.2, 1.16, 2.0), Vector3(0.4, 0.04, 0.3), "#7a1f24", false)
+	# waiting couch and coffee table
+	box(Vector3(1.0, 0.25, 6.2), Vector3(0.9, 0.5, 2.4), "@leather")
+	box(Vector3(0.55, 0.7, 6.2), Vector3(0.25, 0.9, 2.4), "@leather")
+	box(Vector3(2.3, 0.25, 6.2), Vector3(0.7, 0.5, 1.2), "@wood")
+	# potted plant
+	cyl(Vector3(9.3, 0.3, 7.3), 0.25, 0.6, "#3a2a20")
+	for i in 5:
+		var leaf := MeshInstance3D.new()
+		var s := SphereMesh.new()
+		s.radius = 0.28
+		s.height = 0.7
+		leaf.mesh = s
+		leaf.material_override = _mat("#2c4a2a")
+		leaf.position = Vector3(9.3 + sin(i * 1.3) * 0.15, 0.9 + i * 0.12, 7.3 + cos(i * 1.3) * 0.15)
+		add_child(leaf)
+	# posters on the lobby wall
+	for p in [[Vector3(2.5, 1.7, 0.12), "#2b1416", "ESCAPE\nOR ELSE"], [Vector3(4.2, 1.7, 0.12), "#141c2b", "THE STUDY\n60 MIN"]]:
+		box(p[0], Vector3(1.1, 1.5, 0.03), p[1], false)
+		label3d(p[2], p[0] + Vector3(0, 0, 0.03), 48, Color("#d9c9a3"), false)
+
+func _build_study() -> void:
+	# wainscot panels along the lower walls
+	box(Vector3(0.13, 0.5, 14), Vector3(0.06, 1.0, 12), "@wood", false)
+	box(Vector3(15.87, 0.5, 14), Vector3(0.06, 1.0, 12), "@wood", false)
+	box(Vector3(8, 0.5, 19.87), Vector3(16, 1.0, 0.06), "@wood", false)
+	# rug, table, armchairs
+	box(Vector3(8, 0.005, 14.5), Vector3(4.5, 0.01, 3.2), "@rug", false)
+	box(Vector3(8, 0.78, 14.5), Vector3(2.4, 0.06, 1.4), "@wood")
+	for lx in [-1.05, 1.05]:
+		for lz in [-0.6, 0.6]:
+			box(Vector3(8 + lx, 0.38, 14.5 + lz), Vector3(0.08, 0.76, 0.08), "@wood", false)
+	for ax in [5.6, 10.4]:
+		box(Vector3(ax, 0.25, 14.5), Vector3(0.9, 0.5, 0.9), "@leather")
+		box(Vector3(ax + (-0.4 if ax < 8 else 0.4), 0.7, 14.5), Vector3(0.15, 0.9, 0.9), "@leather", false)
+	# desk lamp on the table: the main warm light of the room
+	cyl(Vector3(7.5, 0.85, 14.4), 0.08, 0.08, "#b8913a")
+	cyl(Vector3(7.5, 1.05, 14.4), 0.02, 0.4, "#b8913a")
+	var shade := cyl(Vector3(7.5, 1.28, 14.4), 0.16, 0.18, "#2f4a2a")
+	shade.get_child(0).material_override = glow_mat(Color("#ffd28a"), 0.8)
+	lamp(Vector3(7.5, 1.2, 14.4), "#ffb46b", 4.0, 9)
+	# wall sconces
+	for sc in [Vector3(0.3, 2.0, 16.5), Vector3(15.7, 2.0, 16.5), Vector3(0.3, 2.0, 10.5)]:
+		var bulb := box(sc, Vector3(0.12, 0.2, 0.12), "#000000", false)
+		bulb.get_child(0).material_override = glow_mat(Color("#ffc27a"), 3.0)
+		lamp(sc + Vector3(0.4 if sc.x < 8 else -0.4, 0, 0), "#ffa85c", 1.6, 6)
+	# bookshelves along the back wall, filled with books
+	var colors := ["#5a1e1e", "#1e3a5a", "#2a4a2a", "#5a4a1e", "#3a1e4a", "#1a1a1a", "#6b5a3a"]
+	for sx in [3.0, 6.0, 10.0, 13.0]:
+		box(Vector3(sx, 1.15, 19.65), Vector3(2.2, 2.3, 0.45), "@wood")
+		for shelf in 4:
+			var y := 0.35 + shelf * 0.55
+			var x: float = sx - 1.0
+			while x < sx + 0.95:
+				var w := rng.randf_range(0.04, 0.09)
+				var h := rng.randf_range(0.28, 0.42)
+				box(Vector3(x + w / 2, y + h / 2, 19.38), Vector3(w, h, 0.25), pick(colors), false)
+				x += w + 0.005
+	# grandfather clock, painting and a candle on the side table
+	box(Vector3(15.3, 1.1, 9.0), Vector3(0.6, 2.2, 0.45), "@wood")
+	cyl(Vector3(15.06, 1.7, 9.0), 0.2, 0.02, "#d9c9a3").rotation.z = PI / 2
+	box(Vector3(0.18, 1.8, 13.0), Vector3(0.05, 1.0, 1.4), "#c9b27c", false)
+	box(Vector3(0.15, 1.8, 13.0), Vector3(0.04, 1.1, 1.5), "#3a2a14", false)
+	box(Vector3(15.5, 0.4, 13.0), Vector3(0.6, 0.8, 0.6), "@wood")
+	var flame := cyl(Vector3(15.5, 0.95, 13.0), 0.02, 0.06, "#ffffff")
+	flame.get_child(0).material_override = glow_mat(Color("#ffb347"), 6.0)
+	lamp(Vector3(15.4, 1.1, 13.0), "#ff9a3c", 0.8, 3.5)
 
 func _build_slots() -> void:
 	for i in SLOT_POS.size():
 		var pos: Vector3 = SLOT_POS[i]
-		var b = interactable(pos + Vector3(0, 0.5, 0), Vector3(0.9, 1.0, 0.9), "#3a3f45", "", _on_slot.bind(i))
+		var b = interactable(pos + Vector3(0, 0.5, 0), Vector3(0.9, 1.0, 0.9), "@wood", "", _on_slot.bind(i))
 		var prop := MeshInstance3D.new()
 		var bm := BoxMesh.new()
 		bm.size = Vector3(0.6, 0.6, 0.6)
@@ -267,51 +456,89 @@ func _build_slots() -> void:
 		var lbl := Label3D.new()
 		lbl.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 		lbl.position = Vector3(0, 1.75, 0)
-		lbl.font_size = 44
+		lbl.font_size = 30
 		lbl.pixel_size = 0.005
 		lbl.outline_size = 10
+		lbl.visibility_range_end = 5.0
 		b.add_child(lbl)
 		slot_nodes.append({"body": b, "prop": prop, "label": lbl})
 
+# ---------------------------------------------------------------- CCTV
+const CAMS := [
+	{"name": "CAM 01 · THE STUDY", "pos": Vector3(15.6, 2.85, 8.4), "look": Vector3(7.5, 0, 15.5)},
+	{"name": "CAM 02 · STUDY / SHELVES", "pos": Vector3(0.4, 2.85, 8.4), "look": Vector3(9, 0.5, 18.5)},
+	{"name": "CAM 03 · LOBBY", "pos": Vector3(0.4, 2.85, 0.4), "look": Vector3(6, 0, 5)},
+]
+var cctv_cam: Camera3D
+var cctv_mat: ShaderMaterial
+var cam_index := 0
+var static_t := 0.0
+
 func _build_control_room() -> void:
-	box(Vector3(13, 0.5, 6.9), Vector3(4.5, 1.0, 1.2), "#2a2f36")    # desk
-	# CCTV camera inside the escape room, rendered to a monitor in the control room
+	box(Vector3(13, 0.74, 6.9), Vector3(4.5, 0.06, 1.2), "@wood")      # desk top
+	box(Vector3(11.0, 0.37, 6.9), Vector3(0.5, 0.74, 1.1), "@metal")   # drawer block
+	box(Vector3(15.0, 0.37, 6.9), Vector3(0.5, 0.74, 1.1), "@metal")
+	box(Vector3(15.6, 0.7, 1.0), Vector3(0.6, 1.4, 0.6), "@metal")     # filing cabinet
+	box(Vector3(13, 0.45, 5.6), Vector3(0.6, 0.08, 0.6), "@fabric")    # office chair
+	box(Vector3(13, 0.8, 5.88), Vector3(0.6, 0.7, 0.08), "@fabric", false)
+	cyl(Vector3(13, 0.22, 5.6), 0.04, 0.44, "@metal")
+	cyl(Vector3(14.6, 0.82, 6.6), 0.05, 0.12, "#e9e4d8")              # coffee mug
+	# CCTV: one SubViewport whose camera jumps between the room's cameras
 	var sv := SubViewport.new()
 	sv.size = Vector2i(640, 360)
 	sv.render_target_update_mode = SubViewport.UPDATE_ALWAYS
 	add_child(sv)
-	var cctv := Camera3D.new()
-	cctv.fov = 80
-	sv.add_child(cctv)
-	cctv.position = Vector3(15.6, 2.9, 8.4)
-	cctv.look_at(Vector3(7.5, 0, 15.5), Vector3.UP)
+	cctv_cam = Camera3D.new()
+	cctv_cam.fov = 82
+	sv.add_child(cctv_cam)
+	for c in CAMS:   # small camera housings on the walls
+		box(c.pos, Vector3(0.18, 0.14, 0.3), "#1b1d1f", false).look_at_from_position(c.pos, c.look, Vector3.UP)
 	var screen := MeshInstance3D.new()
 	var q := QuadMesh.new()
 	q.size = Vector2(2.4, 1.35)
 	screen.mesh = q
-	var sm := StandardMaterial3D.new()
-	sm.albedo_texture = sv.get_texture()
-	sm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	screen.material_override = sm
-	screen.position = Vector3(13, 1.9, 7.85)
+	cctv_mat = ShaderMaterial.new()
+	cctv_mat.shader = load("res://shaders/cctv.gdshader")
+	cctv_mat.set_shader_parameter("feed", sv.get_texture())
+	screen.material_override = cctv_mat
+	screen.position = Vector3(13, 1.75, 7.85)
 	screen.rotation.y = PI
 	add_child(screen)
-	box(Vector3(13, 1.9, 7.9), Vector3(2.55, 1.5, 0.05), "#111111", false)
-	monitor_label = label3d("CAM 01  REC", Vector3(13, 2.75, 7.8), 40, Color("#ff4d4d"), false)
+	box(Vector3(13, 1.75, 7.9), Vector3(2.6, 1.55, 0.08), "#0b0b0b", false)
+	monitor_label = label3d("", Vector3(13, 2.62, 7.8), 36, Color("#ff4d4d"), false)
 	monitor_label.rotation.y = PI
+	lamp(Vector3(13, 1.7, 7.0), "#7fb0ff", 0.9, 4)    # screen glow on the operator
 	# buttons on the desk
-	start_btn = interactable(Vector3(11.6, 1.08, 6.6), Vector3(0.5, 0.16, 0.5), "#2fbf71", "", _on_start)
-	label3d("OPEN ROOM", Vector3(11.6, 1.4, 6.6), 32, Color("#2fbf71"))
-	hint_btn = interactable(Vector3(13, 1.08, 6.6), Vector3(0.5, 0.16, 0.5), "#ff4d4d", "", _on_hint)
-	label3d("INTERCOM", Vector3(13, 1.4, 6.6), 32, Color("#ff4d4d"))
-	speed_btn = interactable(Vector3(14.4, 1.08, 6.6), Vector3(0.5, 0.16, 0.5), "#ffb23e", "", _cycle_speed)
-	label3d("SPEED", Vector3(14.4, 1.4, 6.6), 32, Color("#ffb23e"))
+	start_btn = interactable(Vector3(11.6, 0.82, 6.6), Vector3(0.4, 0.1, 0.4), "#2fbf71", "", _on_start)
+	label3d("OPEN ROOM", Vector3(11.6, 1.05, 6.6), 28, Color("#2fbf71"))
+	hint_btn = interactable(Vector3(12.4, 0.82, 6.6), Vector3(0.4, 0.1, 0.4), "#ff4d4d", "", _on_hint)
+	label3d("INTERCOM", Vector3(12.4, 1.05, 6.6), 28, Color("#ff4d4d"))
+	var cam_btn = interactable(Vector3(13.4, 0.82, 6.6), Vector3(0.4, 0.1, 0.4), "#7fb0ff", "Next camera (or press 1, 2, 3)", func(): switch_cam((cam_index + 1) % CAMS.size()))
+	cam_btn.prompt = "Next camera (or press 1, 2, 3)"
+	label3d("CAMERA", Vector3(13.4, 1.05, 6.6), 28, Color("#7fb0ff"))
+	speed_btn = interactable(Vector3(14.3, 0.82, 6.6), Vector3(0.4, 0.1, 0.4), "#ffb23e", "", _cycle_speed)
+	label3d("SPEED", Vector3(14.3, 1.05, 6.6), 28, Color("#ffb23e"))
 	hint_light = OmniLight3D.new()
-	hint_light.position = Vector3(13, 1.5, 6.6)
+	hint_light.position = Vector3(12.4, 1.2, 6.6)
 	hint_light.light_color = Color("#ff4d4d")
 	hint_light.omni_range = 3
 	hint_light.light_energy = 0
 	add_child(hint_light)
+	switch_cam(0)
+
+func switch_cam(i: int) -> void:
+	cam_index = i
+	var c: Dictionary = CAMS[i]
+	cctv_cam.position = c.pos
+	cctv_cam.look_at(c.look, Vector3.UP)
+	static_t = 0.35
+
+func _update_cctv(dt: float) -> void:
+	static_t = max(0.0, static_t - dt)
+	cctv_mat.set_shader_parameter("static_amount", static_t / 0.35)
+	var clock := Time.get_time_dict_from_system()
+	var rec := "●" if int(Time.get_ticks_msec() / 600) % 2 == 0 else " "
+	monitor_label.text = "%s  %s REC  %02d:%02d:%02d" % [CAMS[cam_index].name, rec, clock.hour, clock.minute, clock.second]
 
 func _build_hud() -> void:
 	var layer := CanvasLayer.new()
@@ -458,7 +685,8 @@ func _new_group() -> void:
 	group = {"members": members, "at": 0, "prog": 0.0, "stuck": 0, "hints": 0, "hint_req": false, "boost": false,
 		"escaped": false, "max_stuck": 0, "scares": 0, "fun": 0, "solved": 0, "mess": []}
 	for c in customers:
-		c.queue_free()
+		if is_instance_valid(c):
+			c.queue_free()
 	customers.clear()
 	for i in members.size():
 		var c = Customer.new()
@@ -573,6 +801,7 @@ func _process(dt: float) -> void:
 		hint_light.light_energy = (0.5 + 0.5 * sin(Time.get_ticks_msec() / 150.0)) * 2.0 if group.hint_req else 0.0
 	else:
 		hint_light.light_energy = 0
+	_update_cctv(dt)
 	_refresh_hud()
 
 func _step() -> void:
@@ -655,6 +884,7 @@ func _finish() -> void:
 	for cu in customers:
 		cu.thinking = false
 		cu.go([ROOM_DOOR + Vector3(0, 0, 1.0), ROOM_DOOR + Vector3(0, 0, -0.8), LOBBY_EXIT])
+		cu.leave_when_done = true
 	var reviewer: String = group.members[0].name
 	for m in group.members:
 		if m.trait == "Influencer":

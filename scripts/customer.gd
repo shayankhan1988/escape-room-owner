@@ -6,6 +6,7 @@ var speed := 1.8
 var member: Dictionary = {}
 var body: MeshInstance3D
 var thinking := false
+var leave_when_done := false
 var t := 0.0
 
 func setup(m: Dictionary) -> void:
@@ -37,6 +38,7 @@ func setup(m: Dictionary) -> void:
 	lbl.font_size = 40
 	lbl.pixel_size = 0.004
 	lbl.outline_size = 8
+	lbl.visibility_range_end = 7.0
 	add_child(lbl)
 
 func go(points: Array) -> void:
@@ -50,6 +52,9 @@ func is_idle() -> bool:
 func _process(dt: float) -> void:
 	t += dt
 	if waypoints.is_empty():
+		if leave_when_done:
+			queue_free()
+			return
 		body.rotation.z = sin(t * 3.0 + position.x) * (0.08 if thinking else 0.0)
 		return
 	body.rotation.z = 0

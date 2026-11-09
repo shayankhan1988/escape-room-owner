@@ -18,6 +18,8 @@ A first-person management simulator made with [Godot 4](https://godotengine.org/
 | Mouse | Look around (click the window first) |
 | E or left click | Use what you are looking at |
 | Tab | Change time speed during a session |
+| 1, 2, 3 | Switch security camera |
+| F | Flashlight |
 | Esc | Free the mouse |
 
 ### How a round works
